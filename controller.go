@@ -273,6 +273,7 @@ func (c *Controller) syncHandler(key string) error {
 	deployment, err := c.deploymentsLister.Deployments(foo.Namespace).Get(deploymentName)
 	// If the resource doesn't exist, we'll create it
 	if errors.IsNotFound(err) {
+		klog.V(4).Infof("create deployment %s:%s as it does not exist", foo.Namespace, deployment)
 		deployment, err = c.kubeclientset.AppsV1().Deployments(foo.Namespace).Create(newDeployment(foo))
 	}
 
@@ -296,6 +297,15 @@ func (c *Controller) syncHandler(key string) error {
 	// should update the Deployment resource.
 	if foo.Spec.Replicas != nil && *foo.Spec.Replicas != *deployment.Spec.Replicas {
 		klog.V(4).Infof("Foo %s replicas: %d, deployment replicas: %d", name, *foo.Spec.Replicas, *deployment.Spec.Replicas)
+		deployment, err = c.kubeclientset.AppsV1().Deployments(foo.Namespace).Update(newDeployment(foo))
+	}
+
+	// If this number of the replicas on the Foo resource is specified, and the
+	// number does not equal the current desired replicas on the Deployment, we
+	// should update the Deployment resource.
+	if foo.Spec.PodImage != deployment.Spec.Template.Spec.Containers[0].Image {
+		klog.V(4).Infof("Foo %s Image: %s, deployment Image: %s", name, foo.Spec.PodImage,
+			 deployment.Spec.Template.Spec.Containers[0].Image)
 		deployment, err = c.kubeclientset.AppsV1().Deployments(foo.Namespace).Update(newDeployment(foo))
 	}
 
@@ -365,17 +375,24 @@ func (c *Controller) handleObject(obj interface{}) {
 		}
 		klog.V(4).Infof("Recovered deleted object '%s' from tombstone", object.GetName())
 	}
-	klog.V(4).Infof("Processing object: %s", object.GetName())
+	klog.V(4).Infof("Processing object: %s, label = %+v", object.GetName(), object.GetLabels())
 	if ownerRef := metav1.GetControllerOf(object); ownerRef != nil {
 		// If this object is not owned by a Foo, we should not do anything more
 		// with it.
 		if ownerRef.Kind != "Foo" {
+			klog.V(4).Infof("ignoring object '%s' of owner type '%s'", object.GetName(), ownerRef.Kind)
 			return
 		}
-
+		klog.V(4).Infof("find object '%s' owner type '%s', owner name = %s ", object.GetName(), ownerRef.Kind,
+			ownerRef.Name)
 		foo, err := c.foosLister.Foos(object.GetNamespace()).Get(ownerRef.Name)
 		if err != nil {
-			klog.V(4).Infof("ignoring orphaned object '%s' of foo '%s'", object.GetSelfLink(), ownerRef.Name)
+			klog.V(4).Infof("delete orphaned object '%s' of foo '%s'", object.GetSelfLink(), ownerRef.Name)
+			deletePolicy := metav1.DeletePropagationForeground
+			deleteOption := metav1.DeleteOptions{
+				PropagationPolicy: &deletePolicy,
+			}
+			c.kubeclientset.AppsV1().Deployments(object.GetNamespace()).Delete(object.GetName(), &deleteOption)
 			return
 		}
 
@@ -389,15 +406,20 @@ func (c *Controller) handleObject(obj interface{}) {
 // the Foo resource that 'owns' it.
 func newDeployment(foo *samplev1alpha1.Foo) *appsv1.Deployment {
 	labels := map[string]string{
-		"app":        "nginx",
+		"app":        foo.Spec.DeploymentName,
 		"controller": foo.Name,
 	}
+	klog.V(3).Infof("Create deployment '%s' for foo with image '%s'", foo.Spec.DeploymentName, foo.Spec.PodImage)
+
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      foo.Spec.DeploymentName,
 			Namespace: foo.Namespace,
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(foo, samplev1alpha1.SchemeGroupVersion.WithKind("Foo")),
+			},
+			Labels: map[string]string{
+				"creator": "RZ",
 			},
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -412,8 +434,8 @@ func newDeployment(foo *samplev1alpha1.Foo) *appsv1.Deployment {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:  "nginx",
-							Image: "nginx:latest",
+							Name:  foo.Name,
+							Image: foo.Spec.PodImage,
 						},
 					},
 				},

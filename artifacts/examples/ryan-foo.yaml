@@ -1,0 +1,8 @@
+apiVersion: samplecontroller.k8s.io/v1alpha1
+kind: Foo
+metadata:
+  name: ryan-foo-instance
+spec:
+  deploymentName: ryan-foo-deployment
+  podImage: registry.us-west-1.aliyuncs.com/apphub/test-mutate:latest
+  replicas: 3
